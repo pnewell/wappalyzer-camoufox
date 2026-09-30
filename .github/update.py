@@ -15,7 +15,7 @@ EXTENSION_ARCHIVE = DATA_DIR / "wappalyzer-extension.zip"
 PROMPT_BLOCK = re.compile(
     r"^[ \t]*const current = await get(?:Cached)?Option\('version'\)\n"
     r".*?"
-    r"(?=^[ \t]*initDone\(\))",
+    r"(?=^[ \t]*(?:\} catch\b|\} finally\b|initDone\(\)))",
     re.MULTILINE | re.DOTALL,
 )
 
