@@ -1,41 +1,41 @@
-# Wappalyzer Next
+# Wappalyzer Camoufox
 
-This project is a command line tool and python library that uses the [Wappalyzer](https://www.wappalyzer.com/) browser extension and its fingerprints to detect technologies. Other projects that emerged after the discontinuation of the official open-source project are using outdated fingerprints and lack accuracy on dynamic web apps. This project bypasses those limitations by running the extension in Chromium through Playwright.
+This project is a command line tool and python library that uses the [Wappalyzer](https://www.wappalyzer.com/) browser extension and its fingerprints to detect technologies. Other projects that emerged after the discontinuation of the official open-source project are using outdated fingerprints and lack accuracy on dynamic web apps. This project bypasses those limitations by running the extension in [Camoufox](https://camoufox.com), a Firefox build with fingerprint spoofing, through Playwright.
 
 ![demo](https://github.com/user-attachments/assets/7a51b034-c9a7-44e6-aa80-2f8a23311e72)
 
-- [Installation](https://github.com/s0md3v/wappalyzer-next?tab=readme-ov-file#installation)
-- [For Users](https://github.com/s0md3v/wappalyzer-next?tab=readme-ov-file#for-users)
-- [For Developers](https://github.com/s0md3v/wappalyzer-next?tab=readme-ov-file#for-developers)
-- [FAQ](https://github.com/s0md3v/wappalyzer-next?tab=readme-ov-file#faq)
+- [Installation](#installation)
+- [For Users](#for-users)
+- [For Developers](#for-developers)
+- [FAQ](#faq)
 
 ## Installation
 
-After installing the Python package, install Playwright's Chromium browser:
+After installing the Python package, download the Camoufox browser:
 
 ```bash
-python -m playwright install chromium
+python -m camoufox fetch official/156.0.1-beta.32
 ```
 
-In minimal Linux containers, install Chromium's system dependencies as well:
+In minimal Linux containers, install Firefox's system dependencies as well:
 
 ```bash
-python -m playwright install-deps chromium
+python -m playwright install-deps firefox
 ```
 
 
 #### Install as a command-line tool
 ```bash
-pipx install wappalyzer
-pipx run --spec playwright playwright install chromium
+pipx install git+https://github.com/pnewell/wappalyzer-camoufox.git
+pipx run --spec camoufox camoufox fetch official/156.0.1-beta.32
 ```
 
 #### Install as a library
 To use it as a library, install it with `pip` inside an isolated container e.g. `venv` or `docker`. You may also `--break-system-packages` to do a 'regular' install but it is not recommended.
 
 ```bash
-pip install wappalyzer
-python -m playwright install chromium
+pip install git+https://github.com/pnewell/wappalyzer-camoufox.git
+python -m camoufox fetch official/156.0.1-beta.32
 ```
 
 #### Install with docker
@@ -43,8 +43,8 @@ python -m playwright install chromium
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/s0md3v/wappalyzer-next.git
-cd wappalyzer-next
+git clone https://github.com/pnewell/wappalyzer-camoufox.git
+cd wappalyzer-camoufox
 ```
 
 2. Build and run with Docker Compose:
@@ -94,7 +94,7 @@ When an output flag is used without a file, the report is written to stdout. Sta
 
 ## For Developers
 
-The python library is available on pypi as `wappalyzer` and can be imported with the same name.
+The python library can be imported as `wappalyzer`.
 
 #### Using the Library
 
@@ -117,7 +117,7 @@ for url, technologies in results.items():
         print(f"  {name}{version}")
 ```
 
-The same scanner can also scan one URL at a time without reopening Chromium:
+The same scanner can also scan one URL at a time without reopening Camoufox:
 
 ```python
 from wappalyzer import Wappalyzer
@@ -140,7 +140,7 @@ results = analyze(
 )
 ```
 
-Do not call the top-level `analyze()` function in a loop for large jobs. Use `Wappalyzer.analyze_many()` or `Wappalyzer.analyze()` on a reused scanner so Chromium and the Wappalyzer extension are not reloaded for every URL.
+Do not call the top-level `analyze()` function in a loop for large jobs. Use `Wappalyzer.analyze_many()` or `Wappalyzer.analyze()` on a reused scanner so Camoufox and the Wappalyzer extension are not reloaded for every URL.
 
 #### analyze() Function Parameters
 
@@ -179,8 +179,8 @@ Returns a dictionary with the URL as key and detected technologies as value:
 
 ### FAQ
 
-#### Why Chromium and Playwright?
-The full scanner runs the Wappalyzer extension in Chromium through Playwright. Chromium extension support in Playwright is direct and does not require geckodriver or Selenium.
+#### Why Camoufox?
+Bot protection blocks most headless Chromium traffic. Camoufox spoofs its fingerprint in the browser itself, so the full scanner reaches sites that turn away other headless browsers. It runs Wappalyzer's own Firefox build of the extension, which is read over Firefox's remote debugging protocol because Playwright cannot open extension pages in Firefox.
 
 #### What is the difference between 'fast', 'balanced', and 'full' scan types?
 - **fast**: Sends a single HTTP request to the URL. Doesn't use the extension.

@@ -9,16 +9,21 @@ from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
 
+from camoufox import DefaultAddons
+from camoufox.async_api import AsyncNewBrowser
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
+from wappalyzer.browser.rdp import RemoteDebugger, free_port
 from wappalyzer.core.config import extension_path
 from wappalyzer.core.utils import create_result
 
 
-WAPPALYZER_POPUP_PATH = "html/popup.html"
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+WAPPALYZER_ADDON_ID = "wappalyzer@crunchlabz.com"
 BLOCKED_RESOURCE_TYPES = {"image", "font", "media"}
+REFERER = "https://www.google.com/"
+HOST_OS = {"darwin": "macos", "win32": "windows"}.get(sys.platform, "linux")
+CAMOUFOX_BROWSER = "156.0.1-beta.32"
 
 SELECT_TARGET_TAB_SCRIPT = """
 async (targetUrl) => {
@@ -30,33 +35,13 @@ async (targetUrl) => {
     }
   }
 
-  const queryTabs = () => {
-    if (typeof browser !== 'undefined' && browser.tabs?.query) {
-      return browser.tabs.query({})
-    }
-
-    return new Promise((resolve, reject) => {
-      chrome.tabs.query({}, (tabs) => {
-        const error = chrome.runtime.lastError
-
-        if (error) {
-          reject(new Error(error.message))
-
-          return
-        }
-
-        resolve(tabs || [])
-      })
-    })
-  }
-
   const target = parseUrl(targetUrl)
 
   if (!target || !/^https?:$/.test(target.protocol)) {
     return null
   }
 
-  const tabs = await queryTabs()
+  const tabs = await browser.tabs.query({})
   const isTargetTab = (tab, exact) => {
     if (!tab || !tab.url) {
       return false
@@ -83,28 +68,6 @@ async (targetUrl) => {
 
 GET_DETECTIONS_FOR_TAB_SCRIPT = """
 async (selectedTab) => {
-  const sendMessage = (message) => {
-    if (typeof browser !== 'undefined' && browser.runtime?.sendMessage) {
-      return browser.runtime
-        .sendMessage(message)
-        .catch((error) => ({ __error: error.message || String(error) }))
-    }
-
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        const error = chrome.runtime.lastError
-
-        if (error) {
-          resolve({ __error: error.message || String(error) })
-
-          return
-        }
-
-        resolve(response)
-      })
-    })
-  }
-
   const normaliseDetection = (detection) => {
     const technology = detection.technology
     const pattern = detection.pattern || {}
@@ -134,14 +97,15 @@ async (selectedTab) => {
     return []
   }
 
-  const response = await sendMessage({
-    source: 'popup.js',
-    func: 'getDetectionsForTab',
-    args: [{ id: selectedTab.id, url: selectedTab.url }],
-  })
+  let response
 
-  if (response?.__error) {
-    return response
+  try {
+    response = await Driver.getDetectionsForTab({
+      id: selectedTab.id,
+      url: selectedTab.url,
+    })
+  } catch (error) {
+    return { __error: error.message || String(error) }
   }
 
   const detections = Array.isArray(response)
@@ -272,7 +236,6 @@ STIMULATE_SCRIPT = """
 def _validate_extension_dir(extension_dir):
     required_files = (
         "manifest.json",
-        "html/popup.html",
         "js/background.js",
         "js/index.js",
         "js/content.js",
@@ -288,20 +251,14 @@ def _validate_extension_dir(extension_dir):
     if manifest.get("manifest_version") != 3:
         errors.append("manifest_version must be 3")
 
-    if manifest.get("action", {}).get("default_popup") != WAPPALYZER_POPUP_PATH:
-        errors.append(f"action.default_popup must be {WAPPALYZER_POPUP_PATH}")
+    if not manifest.get("background", {}).get("scripts"):
+        errors.append("background.scripts is required for Firefox")
 
-    if not manifest.get("background", {}).get("service_worker"):
-        errors.append("background.service_worker is required")
-
-    if "scripts" in manifest.get("background", {}):
-        errors.append("background.scripts must be absent for Chromium MV3")
-
-    if "browser_specific_settings" in manifest:
-        errors.append("browser_specific_settings must be absent")
+    if manifest.get("browser_specific_settings", {}).get("gecko", {}).get("id") != WAPPALYZER_ADDON_ID:
+        errors.append(f"browser_specific_settings.gecko.id must be {WAPPALYZER_ADDON_ID}")
 
     if errors:
-        raise RuntimeError("Invalid bundled Chromium extension: " + "; ".join(errors))
+        raise RuntimeError("Invalid bundled Firefox extension: " + "; ".join(errors))
 
 
 def _prepare_extension_dir(extension_archive_path):
@@ -359,13 +316,13 @@ def _page_quiet(activity, quiet_ms=1000):
 
 
 class BrowserDriver:
-    def __init__(self, context, page, user_data_dir, extension_id, timeout_ms):
+    def __init__(self, context, page, user_data_dir, debugger, console, timeout_ms):
         self.context = context
         self.page = page
         self.user_data_dir = Path(user_data_dir)
-        self.extension_id = extension_id
+        self.debugger = debugger
+        self.console = console
         self.timeout_ms = timeout_ms
-        self.popup = None
         self.pending_cookies = []
 
     def add_cookie(self, cookie):
@@ -399,6 +356,8 @@ class BrowserDriver:
             pass
 
     async def close(self):
+        await self.debugger.close()
+
         try:
             await self.context.close()
         except Exception:
@@ -430,7 +389,7 @@ class DriverPool:
                 await self.queue.put(driver)
 
         if self.queue.empty():
-            raise RuntimeError("Failed to initialize Chromium browser contexts")
+            raise RuntimeError("Failed to initialize Camoufox browser contexts")
 
     async def grow_to(self, size):
         if self.closed or size <= self.size:
@@ -447,39 +406,25 @@ class DriverPool:
 
     async def _create_driver(self):
         for attempt in range(self.max_retries):
-            user_data_dir = tempfile.mkdtemp(prefix="wappalyzer-chromium-")
+            user_data_dir = tempfile.mkdtemp(prefix="wappalyzer-camoufox-")
+            debug_port = free_port()
+            debugger = RemoteDebugger(debug_port)
             context = None
 
             try:
-                context = await self.playwright.chromium.launch_persistent_context(
-                    user_data_dir,
-                    channel="chromium",
+                context = await AsyncNewBrowser(
+                    self.playwright,
+                    persistent_context=True,
+                    user_data_dir=user_data_dir,
                     headless=True,
-                    viewport={"width": 1366, "height": 900},
-                    user_agent=USER_AGENT,
-                    timezone_id="UTC",
+                    browser=CAMOUFOX_BROWSER,
+                    os=HOST_OS,
                     reduced_motion="reduce",
                     ignore_https_errors=True,
-                    args=[
-                        f"--disable-extensions-except={self.extension_dir}",
-                        f"--load-extension={self.extension_dir}",
-                        "--disable-background-networking",
-                        "--disable-breakpad",
-                        "--disable-client-side-phishing-detection",
-                        "--disable-component-update",
-                        "--disable-crash-reporter",
-                        "--disable-default-apps",
-                        "--disable-dev-shm-usage",
-                        "--disable-domain-reliability",
-                        "--disable-features=Translate,MediaRouter",
-                        "--disable-notifications",
-                        "--disable-speech-api",
-                        "--disable-sync",
-                        "--metrics-recording-only",
-                        "--mute-audio",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ],
+                    addons=[str(self.extension_dir)],
+                    exclude_addons=[DefaultAddons.UBO],
+                    args=["-start-debugger-server", str(debug_port)],
+                    firefox_user_prefs={"devtools.chrome.enabled": True},
                 )
 
                 timeout_ms = self.timeout * 1000
@@ -494,12 +439,16 @@ class DriverPool:
 
                 await context.route("**/*", route_handler)
 
-                extension_id = await self._get_extension_id(context)
                 pages = context.pages
                 page = pages[0] if pages else await context.new_page()
 
-                return BrowserDriver(context, page, user_data_dir, extension_id, timeout_ms)
+                await debugger.connect()
+                console = await debugger.background_console(WAPPALYZER_ADDON_ID)
+
+                return BrowserDriver(context, page, user_data_dir, debugger, console, timeout_ms)
             except Exception as e:
+                await debugger.close()
+
                 if context:
                     try:
                         await context.close()
@@ -511,15 +460,6 @@ class DriverPool:
                 await asyncio.sleep(1)
 
         return None
-
-    async def _get_extension_id(self, context):
-        service_workers = context.service_workers
-        service_worker = service_workers[0] if service_workers else None
-
-        if service_worker is None:
-            service_worker = await context.wait_for_event("serviceworker", timeout=10000)
-
-        return service_worker.url.split("/")[2]
 
     @asynccontextmanager
     async def get_driver(self):
@@ -561,21 +501,6 @@ class DriverPool:
             shutil.rmtree(self.extension_dir, ignore_errors=True)
 
 
-async def _ensure_popup(driver):
-    popup_url = f"chrome-extension://{driver.extension_id}/{WAPPALYZER_POPUP_PATH}"
-
-    if driver.popup and not driver.popup.is_closed():
-        if driver.popup.url != popup_url:
-            await driver.popup.goto(popup_url, wait_until="domcontentloaded")
-
-        return driver.popup
-
-    driver.popup = await driver.context.new_page()
-    await driver.popup.goto(popup_url, wait_until="domcontentloaded")
-
-    return driver.popup
-
-
 async def _stimulate_page(page, max_duration_ms=1250):
     try:
         await page.evaluate(STIMULATE_SCRIPT, max_duration_ms)
@@ -591,8 +516,7 @@ async def _page_activity(page):
 
 
 async def _get_detections(driver, target_url):
-    popup = await _ensure_popup(driver)
-    selected_tab = await popup.evaluate(SELECT_TARGET_TAB_SCRIPT, target_url)
+    selected_tab = await driver.debugger.call(driver.console, SELECT_TARGET_TAB_SCRIPT, target_url)
 
     if not selected_tab:
         return []
@@ -606,7 +530,7 @@ async def _get_detections(driver, target_url):
     hard_max = min(10.0, max(1.0, driver.timeout_ms / 1000 - 1))
 
     while True:
-        response = await popup.evaluate(GET_DETECTIONS_FOR_TAB_SCRIPT, selected_tab)
+        response = await driver.debugger.call(driver.console, GET_DETECTIONS_FOR_TAB_SCRIPT, selected_tab)
 
         if isinstance(response, dict) and response.get("__error"):
             print(f"Wappalyzer extension error: {response['__error']}", file=sys.stderr)
@@ -651,6 +575,7 @@ async def process_url(driver, url):
                 url,
                 wait_until="load",
                 timeout=driver.timeout_ms,
+                referer=REFERER,
             )
         except PlaywrightTimeoutError:
             try:
