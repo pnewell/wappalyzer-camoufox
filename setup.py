@@ -17,7 +17,7 @@ setup(
     author='Somdev Sangwan',
     author_email='s0md3v@gmail.com',
     license='GNU General Public License v3',
-    url='https://github.com/s0md3v/wappalyzer-next',
+    url='https://github.com/pnewell/wappalyzer-camoufox',
     packages=find_packages(),
     package_data={'wappalyzer': ['data/*']},
     python_requires='>=3.9',
@@ -25,7 +25,7 @@ setup(
         'requests',
         'urllib3',
         'huepy',
-        'playwright',
+        'camoufox>=0.5.3',
         'tldextract',
         'beautifulsoup4',
         'dnspython'

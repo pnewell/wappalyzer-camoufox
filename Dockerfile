@@ -6,6 +6,7 @@ WORKDIR /app
 COPY . /app
 
 RUN pip install --no-cache-dir . \
-    && python -m playwright install --with-deps chromium
+    && python -m playwright install-deps firefox \
+    && echo y | python -m camoufox fetch official/156.0.1-beta.32
 
 ENTRYPOINT ["wappalyzer"]
